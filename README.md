@@ -1,26 +1,70 @@
-# ComfyUI Slothful Attention
+# ComfyUI Slothful Attention & Near-sighted Attention
 
 This custom node allow controlling output without training.
 
 
+# Update history
+
+ - 2023-12-16: Add `Near-sighted Tile` and `Near-sighted Attention`
+ - 2023-12-11: Release
+
 ## What's this?
+
+### Slothful Attention
 
 This nodes allow controlling output images by reducing K and V samples on self-attentions.
 
 The reducing method is similar to [Spatial-Reduction Attention](https://paperswithcode.com/method/spatial-reduction-attention),
 but generating speed may not be increased on typical image sizes due to overheads. (In some cases, slightly slower) 
 
+### Near-sighted Tile
+
+Like HyperTile, this nodes split samples as Q for self-attention. And serves K, V that concatinated local and global samples by given ratio.
+
+This may improve details of images.
+
+### Near-sighted Attention
+
+Near-sighted Tile + Slothful Attention.
+
 
 # 概要
+
+### Slothful Attention
 
 セルフアテンションの K,V を削減することで、画像のコントロールを行います。
 
 [Spatial-Reduction Attention](https://paperswithcode.com/method/spatial-reduction-attention) に近いですが、
-速度向上やメモリ削減などの効果は期待しないでください。
+これ単体では速度向上やメモリ削減などの効果は薄いです。
 
-手元で試した感じですと、1024x1024 程度までのサイズでは、わずかに生成速度上がったかも？程度でした。
-512x512程度の場合、むしろオーバーヘッドで若干遅くなってました。
+基本的には画像コントロール用の機能と考えてください。
 
+### Near-sighted Tile
+
+HyperTileのように、サンプルを分割して self-attentionの Q として利用します。
+また、このときローカルとグローバルを指定された比率で結合して K, V として利用します。
+
+これにより、画像のディテールが改善するかもしれません。
+
+### Near-sighted Attention
+
+Near-sighted Tile と Slothful Attention の両方の機能を持ったノードです。
+
+設定項目は多いですが、速度向上とある程度の画質コントロールが可能となります。
+
+
+## Performance
+
+UNet speed only. (not includes model loading, vae decoding etc.)
+
+| node | 512x512 | 1024x1024 |
+|:----:|----:|----:|
+| Slothful Attention | -8.5% | +28.7% |
+| Near-sighted Tile | -11.3% | +49.2% |
+| Near-sighted Attention | -9.4% | +57.4% |
+
+UNet速度のみの比較です。
+大きめ画像サイズならば速度が上がります。
 
 ## Usage
 
@@ -47,42 +91,32 @@ Tested with SD1.5, SDXL and SSD-1B based models. With LCM-lora, Lora, Controlnet
 SD1.5, SDXL, SSD-1B ベースモデルで確認しています。LCM-lora, lora, Controlnet, IPAdapter などは使えてそうです。
 
 
-## Parameters
-
-![](images/nodes.png)
+## Tips
 
 ### Slothful Attention
 
- - time_decay: Decreasing rate for step advancing.
- - keep_middle: Does not effect to middle block.
-
 `in_...` and `out_..` parameters: individual parameters for `in` and `out` blocks
 
- - mode: Pooling mode for blend
- - depth_decay: Decrease rate for u-net depth
- - strength: Reduction rate (pooling_stride = strength * decay_rate)
- - k_blend: blending factor for K tensor
- - v_blend: blending factor for V tensor
+Slothful is reduction rate. (this will be decreased by depth_decay and time_decay)
 
-note:
-This nodes blend 2 tensors generated with pooling.
-These are same stride but size is 1 or same to stride.
+You can set another blend ratio for K, V
 
-When k_blend is 0, K is just pooled tensor with size=1.
-
-### Slothful Attention Simple
-
-Same to Slothful Attention, but following paramters are combined.
-
- - keep_middle: True
- - in_depth_decay: depth_decay
- - in_k_blend: in_blend
- - in_v_blend: in_blend
- - out_depth_decay: depth_decay
- - out_k_blend: out_blend
- - out_v_blend: out_blend
+Bigger in_k_blend may reduce noises.
 
 
+### Near-sighted Tile
+
+tile_size is in latent space, so tile_size: 64 is 512x512px.
+
+Smaller tile_size may improve image details, but may break consistency of image.
+
+Larger global_ratio may prevent breaking consistency, but decrease details.
+
+### Near-sighted Attention
+
+Tiling is same to Near-sighted tile.
+
+Low tile_size and high slothful may cause lack K and V. This will decrease quarity.
 
 ## パラメータ
 
@@ -93,40 +127,65 @@ Same to Slothful Attention, but following paramters are combined.
  
 `in_...` `out_..` パラメータ: inブロック, outブロックに別のパラメータを適用できます
 
- - mode: プーリングモード
- - depth_decay: u-netの層が深くなるごとに効果を弱める係数です
- - strength: サンプル削減の比率 (pooling_stride = strength * decay_rate)
- - k_blend: K 生成時の ブレンド比率
- - v_blend: V 生成時の ブレンド比率
+Slothful（を depth_decay, time_decayで減らした値）が削減比率になります。
 
-K, V 削減時、プーリングで２つのテンソルを作成して、blendパラメータに応じてブレンドします
+time_decayについては、peak_time (開始が0、終了が1)のステップでは軽減無しで、そこから離れると time_decayに従って効果が軽減されます。
+構図への影響を弱めたいときは、peak_time:0.5 time_decay: 2.5 などの設定が良いかもしれません
+出力の品質が悪いときは、time_decayを上げるか、peak_timeを下げてみてください。
+（最後の方のstepで影響を減らす目的です）
 
-プーリングのstrideは両方同じですが、sizeについては 片方が 1 で もう片方が siride と同じです
+削減時は n サンプルごとに 1 サンプル取り出す one と、n サンプルを mode によってプーリングする pool を
+ブレンドします。ブレンド率は K, V で別の値を指定出来ます。
 
-ブレント比率は size=stride で生成したテンソルの比率ですので、
-blend=0 の時は size=1 のプーリングで生成したテンソルをそのまま利用します
+avr（nサンプルの平均。ぼかしたような感じです） max（max_pooling。シャープネスに近いかもしれません）をブレンドすることで
+アテンションの結果を連続的に変化させられます。
+
+基本的には、ブレンド率は0.5以下が良いかと思います。
+
+ブレンド率上げたときの画像変化は状況によって違うのですが、影響が大きいのは in_k_blend と out_v_blend です
+
+in_k_blend を上げると、髪の毛の描画などが細かくなることもあります。
+i2iとして使うときは、入力の細部への注目が弱くなるのかノイズや細かいパーツの影響が弱くなるようでした。
+
+in_mode による変化はそこまで大きくないですが、1D系だと陰影や光沢などが軽視される傾向があるようです。
+
+in_v_blendは モードによる違いが出やすいみたいです。
+AVGの場合は輪郭が不明瞭になったりします。服の模様とかは結構影響受けやすいみたいです。
+MAXの場合はAVGよりドラスティックな変化になります。モデルによりますが絵画的な描画になることもあります。
+
+in_k_blendを上げると、服の模様などが不鮮明になったり、被写界深度（ボケ）っぽい効果になったりするようです。
+絵がくっきりしすぎている場合はここを調整すると良い具合になってくれることもあります。
+
+out_v_blend はコントラストやシャープネスに関係するようです。
+AVG系モードでは柔らかめ、コントラスト低めの出力、MAX系モードでは固め、コントラスト高めの出力の傾向が出ます。
+
+1Dの方がより強く効果が出ますが、2Dに比べて描画が崩れやすい傾向にあるようです。
 
 
-### Slothful Attention Simple
+### Near-sighted Tile
 
-Slothful Attention とおおまか同じです。以下の対応でパラメータが設定されます。
+tile_sizeは潜在空間での寸法です。なので、tile_size: 64 はピクセルでは 512x512px になります。
+（SD1.5の最も浅い層では）
 
- - keep_middle: True
- - in_depth_decay: depth_decay
- - in_k_blend: in_blend
- - in_v_blend: in_blend
- - out_depth_decay: depth_decay
- - out_k_blend: out_blend
- - out_v_blend: out_blend
+tile_sizeを下げるとディテールが改善するかもしれませんが、画像の一貫性は損なわれやすいです。
+
+global_ratioを上げると一貫性は保たれやすいですが、ディテールは低下するかも知れません。
 
 
-パラメータ数多いと正直使いづらいので、慣れるまでは Simple 側のノードで良いか
+### Near-dighted Attention
+
+タイル分割については、Near-sighted Tile と同等ですが、base・peakで別の値が指定出来るようになっています。
+peak_global_ratioを高めに設定しておくと、一貫性が確保しやすいみたいです。
+
+
+注意として、低いtile_sizeと 高いslothfulの組み合わせでは K, V がかなり少なくなるため、
+品質が目に見えて悪くなります。
 
 
 ## Output sample
 
 Belows are generated on same parameter, except sloth attention.
-
+ｓ
 ### SSD-1b based model with lcm-lora
 
  - checkoint: [ssd-1b-animagine](https://huggingface.co/furusu/SSD-1B-anime)
@@ -136,5 +195,5 @@ Belows are generated on same parameter, except sloth attention.
 |----|----|
 | ![](images/ssd1b_lcm.webp) | ![](images/ssd1b_lcm_mix.webp) |
 
-more sample images: [pooling_modes.md](pooling_modes.md)
+more sample images: [pooling_modes.md](pooling_modes.md), [tiling_sizes.md](tiling_sizes.md)
 
